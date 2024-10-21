@@ -15,6 +15,8 @@ from cassandra.policies import TokenAwarePolicy, DCAwareRoundRobinPolicy
 from cassandra import ConsistencyLevel
 import asyncio
 import gc
+from tqdm import tqdm
+from datetime import datetime
 
 # Rich console setup
 console = Console()
@@ -291,8 +293,8 @@ async def search_scylla(search_input, max_results=None):
         if max_results:
             query += f" LIMIT {max_results}"
 
-        console.print(f"[cyan]Executing query: {query}[/cyan]")
-        console.print(f"[cyan]With parameters: {params}[/cyan]")
+        console.print(f"[cyan]{datetime.now()} - Executing query: {query}[/cyan]")
+        console.print(f"[cyan]{datetime.now()} - With parameters: {params}[/cyan]")
 
         prepared_stmt = scylla_app.session.prepare(query)
         rows = scylla_app.session.execute(prepared_stmt, params)
@@ -300,7 +302,7 @@ async def search_scylla(search_input, max_results=None):
         results = [{'email': row.email, **row.data} for row in rows]
 
         if results:
-            console.print(f"[bold green]Found {len(results)} results:[/bold green]")
+            console.print(f"[bold green]{datetime.now()} - Found {len(results)} results:[/bold green]")
             for i, result in enumerate(results, 1):
                 table = Table(title=f"Result {i}", box=box.ROUNDED)
                 for key, value in result.items():
@@ -317,10 +319,10 @@ async def search_scylla(search_input, max_results=None):
             if save_results:
                 save_results_to_file(results)
         else:
-            console.print("[yellow]No matching records found.[/yellow]")
+            console.print(f"[yellow]{datetime.now()} - No matching records found.[/yellow]")
             
     except Exception as e:
-        console.print(f"[red]Error searching ScyllaDB: {str(e)}[/red]")
+        console.print(f"[red]{datetime.now()} - Error searching ScyllaDB: {str(e)}[/red]")
         if 'query' in locals():
             console.print(f"[yellow]Query attempted: {query}[yellow]")
         if 'params' in locals():
@@ -328,14 +330,15 @@ async def search_scylla(search_input, max_results=None):
 
     finally:
         gc.collect()
-
-async def insert_records_in_batches(records, file_path, batch_size=50):  # Reduced batch size to 50
+async def insert_records_in_batches(records, file_path, batch_size=50):
     try:
         tasks = []
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            tasks.append(insert_batch(batch, file_path))
-        await asyncio.gather(*tasks)
+        total_batches = (len(records) + batch_size - 1) // batch_size
+        with tqdm(total=total_batches, desc="Inserting records", unit="batch") as pbar:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                tasks.append(insert_batch(batch, file_path, pbar))
+            await asyncio.gather(*tasks)
     except Exception as e:
         console.print(f"[red]Error inserting records in batches: {e}[/red]")
 
@@ -357,7 +360,7 @@ async def insert_data_to_scylla(file_path, batch_size=50):  # Reduced batch size
         console.print(f"[yellow]Error details: {str(e)}[/yellow]")
     finally:
         gc.collect()
-async def insert_batch(batch, file_path):
+async def insert_batch(batch, file_path, pbar):
     skipped_count = 0
     batch_stmt = BatchStatement()
     for record in batch:
@@ -368,6 +371,7 @@ async def insert_batch(batch, file_path):
         last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last name', 'last', 'lname', 'l_name', 'family_name', 'family', 'sname', 's_name', 'surname', 'sur_name']))
         phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone number', 'call', 'phone', 'telephone', 'contact', 'number', 'cell', 'mobile', 'cellphone', 'cellular']))
 
+       
         # Use email, username, first_name, last_name, or phone_number as the primary key
         primary_keys = []
         if email:
@@ -396,12 +400,12 @@ async def insert_batch(batch, file_path):
 
     try:
         scylla_app.session.execute(batch_stmt)
+        pbar.update(1)  # Update progress bar
     except Exception as e:
         console.print(f"[red]Error executing batch: {e}[/red]")
 
     if skipped_count > 0:
         console.print(f"[yellow]Skipped {skipped_count} records due to missing primary key.[/yellow]")
-
 def save_results_to_file(results):
     Tk().withdraw()
     
