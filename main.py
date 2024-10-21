@@ -262,73 +262,6 @@ def partition_csv(file_path, chunksize=500000):
             yield chunk
             status.update(f"[bold green]Processed {chunk.index[-1]} rows")
 
-async def insert_data_to_scylla(file_path, batch_size=100, num_threads=100):
-    try:
-        if file_path.endswith('.txt'):
-            df = read_combolist_txt(file_path)
-        else:
-            df = read_malformed_csv(file_path)
-        
-        records = df.to_dict(orient='records')
-        
-        # Set up asyncio tasks
-        tasks = []
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            tasks.append(insert_batch(batch, file_path))
-        
-        await asyncio.gather(*tasks)
-        console.print(f"[green]Data inserted successfully from: {file_path}[/green]")
-    except Exception as e:
-        console.print(f"[red]Error inserting data into ScyllaDB: {e}[/red]")
-        console.print(f"[yellow]Error details: {str(e)}[/yellow]")
-    finally:
-        gc.collect()
-
-async def insert_batch(batch, file_path):
-    skipped_count = 0
-    batch_stmt = BatchStatement()
-    for record in batch:
-        record['source'] = file_path
-        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number'])) 
-        username = convert_to_string(get_value_from_record(record, ['username', 'username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number', 'USERNAME', 'USER_NAME', 'USER', 'LOGIN', 'USER_ID', 'USERID', 'USER-ID', 'USER ID', 'ACCOUNT', 'ACCT', 'ACCOUNT_ID', 'ACCOUNTID', 'ACCOUNT-ID', 'ACCOUNT ID', 'ACCOUNT_NUMBER', 'ACCOUNTNUMBER', 'ACCOUNT-NUMBER', 'ACCOUNT NUMBER', 'Username']))
-        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first name' , 'first', 'fname', 'f_name', 'given_name', 'given', 'gname', 'g_name', 'forename', 'fore_name', 'fore name', 'name', 'name_first', 'namefirst', 'name first', 'name_given', 'namegiven', 'name given']))
-        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last name', 'last', 'lname', 'l_name', 'family_name', 'family', 'sname', 's_name', 'surname', 'sur_name']))
-        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone number', 'call', 'phone', 'telephone', 'contact', 'number', 'cell', 'mobile', 'cellphone', 'cellular']))
-
-        # Use email, username, first_name, last_name, or phone_number as the primary key
-        primary_keys = []
-        if email:
-            primary_keys.append(email)
-        if username:
-            primary_keys.append(username)
-        if first_name and last_name:
-            primary_keys.append(f"{first_name} {last_name}")
-        if phone_number:
-            primary_keys.append(phone_number)
-
-        if not primary_keys:
-            skipped_count += 1
-            continue
-
-        # Convert all values to strings and remove empty values
-        data = {k: convert_to_string(v) for k, v in record.items()}
-        data = {k: v for k, v in data.items() if v}
-
-        try:
-             batch_stmt.add(scylla_app.insert_stmt, (email, username, first_name, last_name, phone_number, data))
-        except Exception as e:
-            console.print(f"[red]Error adding record to batch: {e}[/red]")
-            console.print(f"[yellow]Problematic record: {record}[/yellow]")
-
-    try:
-        scylla_app.session.execute(batch_stmt)
-    except Exception as e:
-        console.print(f"[red]Error executing batch: {e}[/red]")
-
-    if skipped_count > 0:
-        console.print(f"[yellow]Skipped {skipped_count} records due to missing primary key.[/yellow]")
-
 async def search_scylla(search_input, max_results=None):
     try:
         query_conditions = []
@@ -395,7 +328,80 @@ async def search_scylla(search_input, max_results=None):
 
     finally:
         gc.collect()
- 
+
+async def insert_records_in_batches(records, file_path, batch_size=50):  # Reduced batch size to 50
+    try:
+        tasks = []
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            tasks.append(insert_batch(batch, file_path))
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        console.print(f"[red]Error inserting records in batches: {e}[/red]")
+
+async def insert_data_to_scylla(file_path, batch_size=50):  # Reduced batch size to 50
+    try:
+        if isinstance(file_path, str) and file_path.endswith('.txt'):
+            for chunk_df in read_combolist_txt(file_path):
+                records = chunk_df.to_dict(orient='records')
+                await insert_records_in_batches(records, file_path, batch_size)
+        elif isinstance(file_path, str) and file_path.endswith('.csv'):
+            df = read_malformed_csv(file_path)
+            records = df.to_dict(orient='records')
+            await insert_records_in_batches(records, file_path, batch_size)
+        else:
+            raise ValueError("Invalid file path or unsupported file type")
+        console.print(f"[green]Data inserted successfully from: {file_path}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error inserting data into ScyllaDB: {e}[/red]")
+        console.print(f"[yellow]Error details: {str(e)}[/yellow]")
+    finally:
+        gc.collect()
+async def insert_batch(batch, file_path):
+    skipped_count = 0
+    batch_stmt = BatchStatement()
+    for record in batch:
+        record['source'] = file_path
+        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number'])) 
+        username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
+        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first name' , 'first', 'fname', 'f_name', 'given_name', 'given', 'gname', 'g_name', 'forename', 'fore_name', 'fore name', 'name', 'name_first', 'namefirst', 'name first', 'name_given', 'namegiven', 'name given']))
+        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last name', 'last', 'lname', 'l_name', 'family_name', 'family', 'sname', 's_name', 'surname', 'sur_name']))
+        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone number', 'call', 'phone', 'telephone', 'contact', 'number', 'cell', 'mobile', 'cellphone', 'cellular']))
+
+        # Use email, username, first_name, last_name, or phone_number as the primary key
+        primary_keys = []
+        if email:
+            primary_keys.append(email)
+        if username:
+            primary_keys.append(username)
+        if first_name and last_name:
+            primary_keys.append(f"{first_name} {last_name}")
+        if phone_number:
+            primary_keys.append(phone_number)
+
+        if not primary_keys:
+            skipped_count += 1
+            continue
+
+        # Convert all values to strings and remove empty values
+        data = {k: convert_to_string(v) for k, v in record.items()}
+        data = {k: v for k, v in data.items() if v}
+
+        try:
+            for primary_key in primary_keys:
+                batch_stmt.add(scylla_app.insert_stmt, (email, data))
+        except Exception as e:
+            console.print(f"[red]Error adding record to batch: {e}[/red]")
+            console.print(f"[yellow]Problematic record: {record}[/yellow]")
+
+    try:
+        scylla_app.session.execute(batch_stmt)
+    except Exception as e:
+        console.print(f"[red]Error executing batch: {e}[/red]")
+
+    if skipped_count > 0:
+        console.print(f"[yellow]Skipped {skipped_count} records due to missing primary key.[/yellow]")
+
 def save_results_to_file(results):
     Tk().withdraw()
     
@@ -426,18 +432,36 @@ def save_results_to_file(results):
     else:
         console.print("[yellow]Save operation cancelled.[/yellow]")
 
-def read_combolist_txt(file_path):
-    data = []
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+def read_combolist_txt(file_path, chunk_size=10000):
+    def chunk_generator(file, chunk_size):
+        chunk = []
         for line in file:
-            try:
-                email, password = line.strip().split(':', 1)
-                data.append({'email': email, 'hashed_password': password})
-            except:
-                console.print(f"[yellow]Skipping malformed line: {line.strip()}[/yellow]")
-                continue
-    return pd.DataFrame(data)
+            chunk.append(line.strip())
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+        if chunk:
+            yield chunk
 
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for chunk in chunk_generator(file, chunk_size):
+            chunk_data = []
+            for line in chunk:
+                try:
+                    # Handle the {email},{password} format
+                    email, password = line.split(',', 1)
+                    email = email.strip().strip('"')
+                    password = password.strip().strip('"')
+                    chunk_data.append({'email': email, 'hashed_password': password})
+                except ValueError:
+                    console.print(f"[yellow]Skipping malformed line: {line}[/yellow]")
+                    continue
+            yield pd.DataFrame(chunk_data)
+            
+def partition_and_insert_txt(file_path, chunk_size=10000):
+    for chunk_df in read_combolist_txt(file_path, chunk_size):
+        records = chunk_df.to_dict(orient='records')
+        asyncio.run(insert_records_in_batches(records, file_path))
 def load_single_file():
     Tk().withdraw()
     file_path = filedialog.askopenfilename(
@@ -445,10 +469,14 @@ def load_single_file():
         filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")]
     )
     if file_path:
-        asyncio.run(insert_data_to_scylla(file_path))
+        if file_path.endswith('.txt'):
+            partition_and_insert_txt(file_path)
+        elif file_path.endswith('.csv'):
+            asyncio.run(insert_data_to_scylla(file_path))
+        else:
+            console.print("[red]Unsupported file type selected.[/red]")
     else:
         console.print("[yellow]No file selected.[/yellow]")
-
 def load_all_files():
     Tk().withdraw()
     directory = filedialog.askdirectory(title="Select Directory Containing Files")
@@ -456,10 +484,14 @@ def load_all_files():
         for file_name in os.listdir(directory):
             if file_name.endswith(".csv") or file_name.endswith(".txt"):
                 file_path = os.path.join(directory, file_name)
-                asyncio.run(insert_data_to_scylla(file_path))
+                if file_path.endswith('.txt'):
+                    partition_and_insert_txt(file_path)
+                elif file_path.endswith('.csv'):
+                    asyncio.run(insert_data_to_scylla(file_path))
+                else:
+                    console.print(f"[red]Unsupported file type: {file_path}[/red]")
     else:
         console.print("[yellow]No directory selected.[/yellow]")
-
 def load_multiple_files():
     Tk().withdraw()
     file_paths = filedialog.askopenfilenames(
@@ -468,10 +500,14 @@ def load_multiple_files():
     )
     if file_paths:
         for file_path in file_paths:
-            asyncio.run(insert_data_to_scylla(file_path))
+            if file_path.endswith('.txt'):
+                partition_and_insert_txt(file_path)
+            elif file_path.endswith('.csv'):
+                asyncio.run(insert_data_to_scylla(file_path))
+            else:
+                console.print(f"[red]Unsupported file type: {file_path}[/red]")
     else:
         console.print("[yellow]No files selected.[/yellow]")
-
 def main():
     try:
         console.print("[cyan]Initializing ScyllaApp...[/cyan]")
