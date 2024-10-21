@@ -17,13 +17,14 @@ import asyncio
 import gc
 from tqdm import tqdm
 from datetime import datetime
+import json 
 
 # Rich console setup
 console = Console()
 
 # ScyllaDB connection setup
 class ScyllaApp:
-    def __init__(self, contact_points=['localhost'], port=32770, keyspace='user_data'):
+    def __init__(self, contact_points=['localhost'], port=32768, keyspace='user_data'):
         profile = ExecutionProfile(
             load_balancing_policy=TokenAwarePolicy(DCAwareRoundRobinPolicy()),
             consistency_level=ConsistencyLevel.LOCAL_QUORUM
@@ -406,20 +407,56 @@ async def insert_batch(batch, file_path, pbar):
 
     if skipped_count > 0:
         console.print(f"[yellow]Skipped {skipped_count} records due to missing primary key.[/yellow]")
-def save_results_to_file(results):
-    Tk().withdraw()
-    
-    file_path = filedialog.asksaveasfilename(
-        title="Save Results",
-        defaultextension=".csv",
-        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-    )
-    
-    if file_path:
-        df = pd.DataFrame(results)
-        df.to_csv(file_path, index=False)
-        console.print(f"[green]Results saved to {file_path}[/green]")
-    
+
+def read_json(file_path):
+    with open(file_path, 'r', encoding='utf-8') as file:
+        data = json.load(file)
+    return data
+
+def process_json_data(data, file_path):
+    records = []
+    for record in data:
+        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
+        username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
+        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first name' , 'first', 'fname', 'f_name', 'given_name', 'given', 'gname', 'g_name', 'forename', 'fore_name', 'fore name', 'name', 'name_first', 'namefirst', 'name first', 'name_given', 'namegiven', 'name given']))
+        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last name', 'last', 'lname', 'l_name', 'family_name', 'family', 'sname', 's_name', 'surname', 'sur_name']))
+        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone number', 'call', 'phone', 'telephone', 'contact', 'number', 'cell', 'mobile', 'cellphone', 'cellular']))
+
+        # Use email, username, first_name, last_name, or phone_number as the primary key
+        primary_keys = []
+        if email:
+            primary_keys.append(email)
+        if username:
+            primary_keys.append(username)
+        if first_name and last_name:
+            primary_keys.append(f"{first_name} {last_name}")
+        if phone_number:
+            primary_keys.append(phone_number)
+
+        if not primary_keys:
+            console.print("[yellow]Skipping record due to missing keys[/yellow]")
+            continue
+
+        # Convert all values to strings and remove empty values
+        data = {k: convert_to_string(v) for k, v in record.items()}
+        data = {k: v for k, v in data.items() if v}
+
+        records.append({
+            'email': email,
+            'username': username,
+            'first_name': first_name,
+            'last_name': last_name,
+            'phone_number': phone_number,
+            'data': data,
+            'source': file_path
+        })
+
+    return records
+
+def partition_and_insert_json(file_path, chunk_size=10000):
+    data = read_json(file_path)
+    records = process_json_data(data, file_path)
+    asyncio.run(insert_records_in_batches(records, file_path, chunk_size))
 def save_results_to_file(results):
     Tk().withdraw()
     
@@ -470,13 +507,15 @@ def load_single_file():
     Tk().withdraw()
     file_path = filedialog.askopenfilename(
         title="Select a File",
-        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")]
+        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt"), ("JSON Files", "*.json")]
     )
     if file_path:
         if file_path.endswith('.txt'):
             partition_and_insert_txt(file_path)
         elif file_path.endswith('.csv'):
             asyncio.run(insert_data_to_scylla(file_path))
+        elif file_path.endswith('.json'):
+            partition_and_insert_json(file_path)
         else:
             console.print("[red]Unsupported file type selected.[/red]")
     else:
@@ -486,12 +525,14 @@ def load_all_files():
     directory = filedialog.askdirectory(title="Select Directory Containing Files")
     if directory:
         for file_name in os.listdir(directory):
-            if file_name.endswith(".csv") or file_name.endswith(".txt"):
+            if file_name.endswith(".csv") or file_name.endswith(".txt") or file_name.endswith(".json"):
                 file_path = os.path.join(directory, file_name)
                 if file_path.endswith('.txt'):
                     partition_and_insert_txt(file_path)
                 elif file_path.endswith('.csv'):
                     asyncio.run(insert_data_to_scylla(file_path))
+                elif file_path.endswith('.json'):
+                    partition_and_insert_json(file_path)
                 else:
                     console.print(f"[red]Unsupported file type: {file_path}[/red]")
     else:
@@ -500,7 +541,7 @@ def load_multiple_files():
     Tk().withdraw()
     file_paths = filedialog.askopenfilenames(
         title="Select Files",
-        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")]
+        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt"), ("JSON Files", "*.json")]
     )
     if file_paths:
         for file_path in file_paths:
@@ -508,6 +549,8 @@ def load_multiple_files():
                 partition_and_insert_txt(file_path)
             elif file_path.endswith('.csv'):
                 asyncio.run(insert_data_to_scylla(file_path))
+            elif file_path.endswith('.json'):
+                partition_and_insert_json(file_path)
             else:
                 console.print(f"[red]Unsupported file type: {file_path}[/red]")
     else:
