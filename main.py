@@ -25,7 +25,7 @@ console = Console()
 
 # ScyllaDB connection setup
 class ScyllaApp:
-    def __init__(self, contact_points=['localhost'], port=32768, keyspace='user_data'):
+    def __init__(self, contact_points=['localhost'], port=9042, keyspace='user_data'):
         profile = ExecutionProfile(
             load_balancing_policy=TokenAwarePolicy(DCAwareRoundRobinPolicy()),
             consistency_level=ConsistencyLevel.LOCAL_QUORUM
@@ -295,24 +295,58 @@ async def load_all_files(scylla_app):
                     await process_file(file_path, scylla_app)
     else:
         console.print("[yellow]No directory selected.[/yellow]")
+
 async def insert_batch(batch, file_path, scylla_app, pbar):
     skipped_count = 0
     batch_stmt = BatchStatement()
+    existing_columns = set()
+    primary_keys = ['email', 'username']
+
+    # Fetch existing columns from the table
+    try:
+        table_metadata = scylla_app.cluster.metadata.keyspaces[scylla_app.session.keyspace].tables['user_data']
+        existing_columns = set(table_metadata.columns.keys())
+    except Exception as e:
+        console.print(f"[red]Error fetching table metadata: {e}[/red]")
+
     for record in batch:
         record['source'] = file_path
         email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number', 'Email']))
         username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
-        
+        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first', 'fname', 'f_name', 'f-name', 'f name', 'given_name', 'givenname', 'given-name', 'given name', 'forename', 'fore_name', 'fore-name', 'fore name', 'fore_name', 'forename ']))
+        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last', 'lname', 'l_name', 'l-name', 'l name', 'family_name', 'familyname', 'family-name', 'family name', 'surname', 'sur_name', 'sur-name', 'sur name', 'sur_name', 'surname' ]))
+        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone', 'telephone', 'tel', 'phone_number', 'phone-number', 'phone number', 'phone_no', 'phone-no', 'phone no', 'phone_num', 'phone-num', 'phone num', 'phone_num' ]))
+        city = convert_to_string(get_value_from_record(record, ['city', 'town', 'location', 'city_name', 'cityname', 'city-name', 'city name', 'city_town', 'citytown', 'city-town', 'city town', 'city_location', 'citylocation', 'city-location', 'city location' ]))
+        state = convert_to_string(get_value_from_record(record, ['state', 'province', 'region', 'state_province', 'stateprovince', 'state-province', 'state province', 'state_region', 'stateregion', 'state-region', 'state region', 'state_province_region' ]))
+        dob = convert_to_string(get_value_from_record(record, ['dob', 'date_of_birth', 'dateofbirth', 'date-of-birth', 'date of birth', 'birth_date', 'birthdate', 'birth-date', 'birth date', 'dob_date', 'dob-date', 'dob date', 'dob_date', 'dob_date', 'dobdate' ]))
+                                                               
         # Add lowercase versions
         email_lower = email.lower() if email else None
         username_lower = username.lower() if username else None
 
-        insert_stmt = scylla_app.session.prepare("""
-            INSERT INTO user_data (email, username, email_lower, username_lower, data, source)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """)
+        # Check for new columns and alter table if necessary
+        for key in record.keys():
+            if key not in existing_columns:
+                try:
+                    scylla_app.session.execute(f"ALTER TABLE user_data ADD {key} text")
+                    existing_columns.add(key)
+                    console.print(f"[green]Added new column '{key}' to table 'user_data'[/green]")
+                except Exception as e:
+                    console.print(f"[red]Error adding column '{key}': {e}[/red]")
+
+        # Ensure at least one primary key (email or username) is present
+        if not email and not username:
+            skipped_count += 1
+            console.print(f"[yellow]Skipped record due to missing primary key (email or username): {record}[/yellow]")
+            continue
+
+        # Prepare the insert statement with all columns
+        columns = ', '.join(record.keys())
+        placeholders = ', '.join(['?'] * len(record))
+        insert_stmt = scylla_app.session.prepare(f"INSERT INTO user_data ({columns}) VALUES ({placeholders})")
+
         try:
-            batch_stmt.add(insert_stmt, (email, username, email_lower, username_lower, json.dumps(record), file_path))
+            batch_stmt.add(insert_stmt, tuple(record.values()))
         except Exception as e:
             pbar.update(len(batch))
             console.print(f"[red]Error adding record to batch: {e}[/red]")
@@ -325,7 +359,7 @@ async def insert_batch(batch, file_path, scylla_app, pbar):
         console.print(f"[red]Error executing batch: {e}[/red]")
 
     if skipped_count > 0:
-        console.print(f"[yellow]Skipped {skipped_count} records due to errors.[/yellow]")
+        console.print(f"[yellow]Skipped {skipped_count} records due to missing primary keys (email or username).[/yellow]")
 async def insert_records_in_batches(records, file_path, scylla_app, batch_size=100):
     try:
         with tqdm(total=len(records), desc=f"Processing {file_path}") as pbar:
@@ -334,10 +368,9 @@ async def insert_records_in_batches(records, file_path, scylla_app, batch_size=1
                 try:
                     await insert_batch(batch, file_path, scylla_app, pbar)
                 except Exception as e:
-                    console.print(f"[red]Error inserting batch: {str(e)}[/red]")
-                await asyncio.sleep(0.1)  # Prevent overwhelming the database
+                    console.print(f"[red]Error inserting batch: {e}[/red]")
     except Exception as e:
-        console.print(f"[red]Error in batch insertion: {str(e)}[/red]")
+        console.print(f"[red]Error processing batches: {e}[/red]")
 async def process_file(file_path, scylla_app):
     try:
         if file_path.endswith('.csv'):
