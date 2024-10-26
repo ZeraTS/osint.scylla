@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import re
 from tkinter import Tk, filedialog, simpledialog, messagebox
@@ -15,10 +16,10 @@ from cassandra.policies import TokenAwarePolicy, DCAwareRoundRobinPolicy
 from cassandra import ConsistencyLevel
 import asyncio
 import gc
-from tqdm import tqdm
 from datetime import datetime
-import json 
+import json
 import sqlparse
+
 # Rich console setup
 console = Console()
 
@@ -47,7 +48,15 @@ class ScyllaApp:
         self.create_materialized_views()
         self.create_indexes()
         self.prepare_statements()
-        total_rows = scylla_app.count_total_rows("user_data")
+
+    def close(self):
+        """Close the cluster connection"""
+        try:
+            if hasattr(self, 'cluster'):
+                self.cluster.shutdown()
+            console.print("[green]ScyllaDB connection closed successfully[/green]")
+        except Exception as e:
+            console.print(f"[red]Error closing ScyllaDB connection: {str(e)}[/red]")
 
     def create_keyspace_if_not_exists(self, keyspace_name):
         try:
@@ -59,72 +68,98 @@ class ScyllaApp:
         except Exception as e:
             console.print(f"[red]Error creating keyspace: {str(e)}[/red]")
             raise
-    
+
     def create_indexes(self):
-     try:
-        self.session.execute("CREATE INDEX IF NOT EXISTS idx_first_name ON user_data (first_name)")
-        self.session.execute("CREATE INDEX IF NOT EXISTS idx_last_name ON user_data (last_name)")
-        self.session.execute("CREATE INDEX IF NOT EXISTS idx_phone_number ON user_data (phone_number)")
-        self.session.execute("CREATE INDEX IF NOT EXISTS idx_username ON user_data (username)")
-        self.session.execute("CREATE INDEX IF NOT EXISTS idx_source ON user_data (source)")
-        console.print("[green]Secondary indexes created[/green]")
-     except Exception as e:
-        console.print(f"[red]Error creating indexes: {str(e)}[/red]")
+        try:
+            self.session.execute("CREATE INDEX IF NOT EXISTS idx_first_name ON user_data (first_name)")
+            self.session.execute("CREATE INDEX IF NOT EXISTS idx_last_name ON user_data (last_name)")
+            self.session.execute("CREATE INDEX IF NOT EXISTS idx_phone_number ON user_data (phone_number)")
+            self.session.execute("CREATE INDEX IF NOT EXISTS idx_username ON user_data (username)")
+            self.session.execute("CREATE INDEX IF NOT EXISTS idx_source ON user_data (source)")
+            console.print("[green]Secondary indexes created[/green]")
+        except Exception as e:
+            console.print(f"[red]Error creating indexes: {str(e)}[/red]")
 
     def create_materialized_views(self):
-     try:
-        self.session.execute("""
-          CREATE MATERIALIZED VIEW IF NOT EXISTS user_data_by_username AS
-          SELECT * FROM user_data
-          WHERE username IS NOT NULL AND email IS NOT NULL
-          PRIMARY KEY (username, email)
-          """)
-        self.session.execute("""
-            CREATE MATERIALIZED VIEW IF NOT EXISTS user_data_by_first_name AS
-            SELECT * FROM user_data
-            WHERE first_name IS NOT NULL AND email IS NOT NULL
-            PRIMARY KEY (first_name, email)
-        """)
-        self.session.execute("""
-            CREATE MATERIALIZED VIEW IF NOT EXISTS user_data_by_last_name AS
-            SELECT * FROM user_data
-            WHERE last_name IS NOT NULL AND email IS NOT NULL
-            PRIMARY KEY (last_name, email)
-        """)
-        console.print("[green]Materialized views created[/green]")
-     except Exception as e:
-      console.print(f"[red]Error creating materialized views: {str(e)}[/red]")
+        try:
+            self.session.execute("""
+                CREATE MATERIALIZED VIEW IF NOT EXISTS user_data_by_first_name AS
+                SELECT *
+                FROM user_data
+                WHERE first_name IS NOT NULL 
+                    AND email IS NOT NULL 
+                    AND username IS NOT NULL 
+                    AND last_name IS NOT NULL 
+                    AND phone_number IS NOT NULL
+                    AND city IS NOT NULL
+                    AND state IS NOT NULL
+                    AND dob IS NOT NULL
+                PRIMARY KEY (first_name, email, username, last_name, phone_number, city, state, dob)
+            """)
+            self.session.execute("""
+                CREATE MATERIALIZED VIEW IF NOT EXISTS user_data_by_last_name AS
+                SELECT *
+                FROM user_data
+                WHERE last_name IS NOT NULL 
+                    AND email IS NOT NULL 
+                    AND username IS NOT NULL 
+                    AND first_name IS NOT NULL 
+                    AND phone_number IS NOT NULL
+                    AND city IS NOT NULL
+                    AND state IS NOT NULL
+                    AND dob IS NOT NULL
+                PRIMARY KEY (last_name, email, username, first_name, phone_number, city, state, dob)
+            """)
+            self.session.execute("""
+                CREATE MATERIALIZED VIEW IF NOT EXISTS user_data_by_phone_number AS
+                SELECT *
+                FROM user_data
+                WHERE phone_number IS NOT NULL 
+                    AND email IS NOT NULL 
+                    AND username IS NOT NULL 
+                    AND first_name IS NOT NULL 
+                    AND last_name IS NOT NULL
+                    AND city IS NOT NULL
+                    AND state IS NOT NULL
+                    AND dob IS NOT NULL
+                PRIMARY KEY (phone_number, email, username, first_name, last_name, city, state, dob)
+            """)
+            console.print("[green]Materialized views created[/green]")
+        except Exception as e:
+            console.print(f"[red]Error creating materialized views: {str(e)}[/red]")
 
     def create_table_if_not_exists(self):
         try:
             self.session.execute("""
-               CREATE TABLE IF NOT EXISTS user_data (
-                 primary_key text,
-                 email text,
-                 username text,
-                 first_name text,
-                 last_name text,
-                 phone_number text,
-                 data map<text, text>,
-                 PRIMARY KEY ((email), username)
+                CREATE TABLE IF NOT EXISTS user_data (
+                    email text,
+                    username text,
+                    first_name text,
+                    last_name text,
+                    phone_number text,
+                    city text,
+                    state text,
+                    dob text,
+                    source text,
+                    data text,
+                    PRIMARY KEY ((email), username, first_name, last_name, phone_number, city, state, dob)
                 );
             """)
-
             console.print("[green]Table 'user_data' created or already exists[/green]")
-            console.print("[green]Indexes created[/green]")
         except Exception as e:
-            console.print(f"[red]Error creating table or indexes: {str(e)}[/red]")
+            console.print(f"[red]Error creating table: {str(e)}[/red]")
 
     def prepare_statements(self):
-     try:
-        self.insert_stmt = self.session.prepare("""
-            INSERT INTO user_data (email, username, first_name, last_name, phone_number, data) VALUES (?, ?, ?, ?, ?, ?)
-        """)
-        self.select_stmt = self.session.prepare("SELECT * FROM user_data WHERE email = ?")
-        console.print("[green]Prepared statements created[/green]")
-     except Exception as e:
-        console.print(f"[red]Error preparing statements: {str(e)}[/red]")
-        raise
+        try:
+            self.insert_stmt = self.session.prepare("""
+                INSERT INTO user_data (email, username, first_name, last_name, phone_number, city, state, dob, source, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+            self.select_stmt = self.session.prepare("SELECT * FROM user_data WHERE email = ?")
+            console.print("[green]Prepared statements created[/green]")
+        except Exception as e:
+            console.print(f"[red]Error preparing statements: {str(e)}[/red]")
+            raise
+
     def count_total_rows(self, table_name):
         try:
             query = f"SELECT COUNT(*) FROM {table_name}"
@@ -135,39 +170,33 @@ class ScyllaApp:
         except Exception as e:
             console.print(f"[red]Error counting rows in {table_name}: {str(e)}[/red]")
             return None
+
     def insert_data_in_batches(self, data, batch_size=50):
-      for i in range(0, len(data), batch_size):
-        batch = BatchStatement()
-        for record in data[i:i + batch_size]:
-            email = record.get('email')
-            username = record.get('username')
-            first_name = record.get('first_name')
-            last_name = record.get('last_name')
-            phone_number = record.get('phone_number')
+        for i in range(0, len(data), batch_size):
+            batch = BatchStatement()
+            for record in data[i:i + batch_size]:
+                email = record.get('email')
+                username = record.get('username')
+                first_name = record.get('first_name')
+                last_name = record.get('last_name')
+                phone_number = record.get('phone_number')
 
-            # Ensure at least one key is present
-            if not (email or username or (first_name and last_name) or phone_number):
-                console.print("[yellow]Skipping record due to missing keys[/yellow]")
-                continue
+                # Ensure at least one key is present
+                if not (email or username or (first_name and last_name) or phone_number):
+                    console.print("[yellow]Skipping record due to missing keys[/yellow]")
+                    continue
 
-            primary_key = email or username or f"{first_name} {last_name}" or phone_number
+                primary_key = email or username or f"{first_name} {last_name}" or phone_number
+                try:
+                    batch.add(self.insert_stmt, (primary_key, record['data']))
+                except Exception as e:
+                    console.print(f"[red]Error adding record to batch: {e}[/red]")
+                    console.print(f"[yellow]Problematic record: {record}[/yellow]")
+
             try:
-                batch.add(self.insert_stmt, (primary_key, record['data']))
+                self.session.execute(batch)
             except Exception as e:
-                console.print(f"[red]Error adding record to batch: {e}[/red]")
-                console.print(f"[yellow]Problematic record: {record}[/yellow]")
-
-        try:
-            self.session.execute(batch)
-        except Exception as e:
-            console.print(f"[red]Error executing batch: {e}[/red]")
-
-    def close(self):
-        self.cluster.shutdown()
-        console.print("[yellow]ScyllaDB connection closed[/yellow]")
-
-# Initialize ScyllaApp
-scylla_app = ScyllaApp()
+                console.print(f"[red]Error executing batch: {e}[/red]")
 
 # Helper functions for detecting patterns in data
 def detect_phone_number(cell_value):
@@ -254,7 +283,107 @@ def read_malformed_csv(file_path, delimiter=','):
 
     df = pd.DataFrame(cleaned_data[1:], columns=cleaned_data[0])
     return df
+async def load_all_files(scylla_app):
+    root = Tk()
+    root.withdraw()  # Hide the root window
+    directory = filedialog.askdirectory(title="Select a directory")
+    if directory:
+        for root, _, files in os.walk(directory):
+            for file in files:
+                if file.endswith(".csv") or file.endswith(".txt"):
+                    file_path = os.path.join(root, file)
+                    await process_file(file_path, scylla_app)
+    else:
+        console.print("[yellow]No directory selected.[/yellow]")
+async def insert_batch(batch, file_path, scylla_app, pbar):
+    skipped_count = 0
+    batch_stmt = BatchStatement()
+    for record in batch:
+        record['source'] = file_path
+        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number', 'Email']))
+        username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
+        
+        # Add lowercase versions
+        email_lower = email.lower() if email else None
+        username_lower = username.lower() if username else None
 
+        insert_stmt = scylla_app.session.prepare("""
+            INSERT INTO user_data (email, username, email_lower, username_lower, data, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """)
+        try:
+            batch_stmt.add(insert_stmt, (email, username, email_lower, username_lower, json.dumps(record), file_path))
+        except Exception as e:
+            pbar.update(len(batch))
+            console.print(f"[red]Error adding record to batch: {e}[/red]")
+            console.print(f"[yellow]Problematic record: {record}[/yellow]")
+
+    try:
+        scylla_app.session.execute(batch_stmt)
+        pbar.update(len(batch))  # Update the progress bar after each batch
+    except Exception as e:
+        console.print(f"[red]Error executing batch: {e}[/red]")
+
+    if skipped_count > 0:
+        console.print(f"[yellow]Skipped {skipped_count} records due to errors.[/yellow]")
+async def insert_records_in_batches(records, file_path, scylla_app, batch_size=100):
+    try:
+        with tqdm(total=len(records), desc=f"Processing {file_path}") as pbar:
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                try:
+                    await insert_batch(batch, file_path, scylla_app, pbar)
+                except Exception as e:
+                    console.print(f"[red]Error inserting batch: {str(e)}[/red]")
+                await asyncio.sleep(0.1)  # Prevent overwhelming the database
+    except Exception as e:
+        console.print(f"[red]Error in batch insertion: {str(e)}[/red]")
+async def process_file(file_path, scylla_app):
+    try:
+        if file_path.endswith('.csv'):
+            df = read_malformed_csv(file_path)
+            records = df.to_dict(orient='records')
+            await insert_records_in_batches(records, file_path, scylla_app)
+        elif file_path.endswith('.txt'):
+            with open(file_path, 'r', encoding='utf-8') as infile:
+                records = [json.loads(line) for line in infile]
+                await insert_records_in_batches(records, file_path, scylla_app)
+        else:
+            console.print(f"[red]Unsupported file type: {file_path}[/red]")
+    except Exception as e:
+        console.print(f"[red]Error processing file {file_path}: {e}[/red]")
+async def process_file(file_path, scylla_app):
+    try:
+        if file_path.endswith('.csv'):
+            df = read_malformed_csv(file_path)
+            records = df.to_dict(orient='records')
+            await insert_records_in_batches(records, file_path, scylla_app)
+        elif file_path.endswith('.txt'):
+            with open(file_path, 'r', encoding='utf-8') as infile:
+                records = [json.loads(line) for line in infile]
+                await insert_records_in_batches(records, file_path, scylla_app)
+        else:
+            console.print(f"[red]Unsupported file type: {file_path}[/red]")
+    except Exception as e:
+        console.print(f"[red]Error processing file {file_path}: {e}[/red]")
+async def load_single_file(scylla_app):
+    root = Tk()
+    root.withdraw()  # Hide the root window
+    file_path = filedialog.askopenfilename(title="Select a file", filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")])
+    if file_path:
+        await process_file(file_path, scylla_app)
+    else:
+        console.print("[yellow]No file selected.[/yellow]")
+async def load_multiple_files(scylla_app):
+    root = Tk()
+    root.withdraw()  # Hide the root window
+    file_paths = filedialog.askopenfilenames(title="Select files", filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")])
+    if file_paths:
+        for file_path in file_paths:
+            await process_file(file_path, scylla_app)
+    else:
+        console.print("[yellow]No files selected.[/yellow]")
+        
 def partition_csv(file_path, chunksize=500000):
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     
@@ -275,45 +404,59 @@ def partition_csv(file_path, chunksize=500000):
             yield chunk
             status.update(f"[bold green]Processed {chunk.index[-1]} rows")
 
-async def search_scylla(search_input, max_results=None):
+def save_results_to_file(results, file_name="search_results.json"):
+    try:
+        with open(file_name, 'w') as f:
+            json.dump(results, f, indent=4)
+        console.print(f"[green]Results saved to {file_name}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error saving results to file: {str(e)}[/red]")
+
+async def search_scylla(search_input, scylla_app, max_results=None):
     try:
         query_conditions = []
         params = []
 
         # Define primary and alternative keys
-        primary_and_alternative_keys = ["email", "first_name", "last_name", "phone_number", "username"]
+        primary_and_alternative_keys = ["email", "first_name", "last_name", "phone_number", "username", "city", "state", "dob"]
 
         if ':' in search_input:
             field, value = search_input.split(':', 1)
             if field in primary_and_alternative_keys:
                 query_conditions.append(f"{field} = ?")
-                params.append(value)
+                params.extend([value.lower(), value.capitalize(), value.upper()])
             else:
                 query_conditions.append(f"data CONTAINS KEY '{field}' AND data['{field}'] = ?")
-                params.append(value)
+                params.extend([value.lower(), value.capitalize(), value.upper()])
         else:
             query_conditions.append("data CONTAINS ?")
-            params.append(search_input)
+            params.extend([search_input.lower(), search_input.capitalize(), search_input.upper()])
+
+        # Ensure preceding primary key columns are included
+        if 'city' in [cond.split('=')[0].strip() for cond in query_conditions]:
+            if 'username' not in [cond.split('=')[0].strip() for cond in query_conditions]:
+                # Prompt the user to enter the username
+                username = input("Enter username: ")
+                query_conditions.append("username = ?")
+                params.extend([username.lower(), username.capitalize(), username.upper()])
 
         # Construct the query
-        if any(search_input.startswith(f"{key}:") for key in primary_and_alternative_keys):
-            query = f"SELECT email, data FROM user_data WHERE {' AND '.join(query_conditions)}"
-        else:
-            query = f"SELECT email, data FROM user_data WHERE {' AND '.join(query_conditions)} ALLOW FILTERING"
+        query = f"SELECT email, data FROM user_data WHERE {' AND '.join(query_conditions)} ALLOW FILTERING"
 
         if max_results:
             query += f" LIMIT {max_results}"
 
-        console.print(f"[cyan]{datetime.now()} - Executing query: {query}[/cyan]")
-        console.print(f"[cyan]{datetime.now()} - With parameters: {params}[/cyan]")
+        console.print(f"[cyan]Executing query: {query}[/cyan]")
+        console.print(f"[cyan]With parameters: {params}[/cyan]")
 
         prepared_stmt = scylla_app.session.prepare(query)
         rows = scylla_app.session.execute(prepared_stmt, params)
 
-        results = [{'email': row.email, **row.data} for row in rows]
+        # Filter out results from the NPD directory
+        results = [{'email': row.email, **json.loads(row.data)} for row in rows if 'G:/Fraud/Breaches/NPD/' not in row.data]
 
         if results:
-            console.print(f"[bold green]{datetime.now()} - Found {len(results)} results:[/bold green]")
+            console.print(f"[bold green]Found {len(results)} results:[/bold green]")
             for i, result in enumerate(results, 1):
                 table = Table(title=f"Result {i}", box=box.ROUNDED)
                 for key, value in result.items():
@@ -330,10 +473,10 @@ async def search_scylla(search_input, max_results=None):
             if save_results:
                 save_results_to_file(results)
         else:
-            console.print(f"[yellow]{datetime.now()} - No matching records found.[/yellow]")
+            console.print("[yellow]No matching records found.[/yellow]")
             
     except Exception as e:
-        console.print(f"[red]{datetime.now()} - Error searching ScyllaDB: {str(e)}[/red]")
+        console.print(f"[red]Error searching ScyllaDB: {str(e)}[/red]")
         if 'query' in locals():
             console.print(f"[yellow]Query attempted: {query}[yellow]")
         if 'params' in locals():
@@ -341,298 +484,120 @@ async def search_scylla(search_input, max_results=None):
 
     finally:
         gc.collect()
-def read_sql(file_path):
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            content = file.read().strip()
-            if not content:
-                raise ValueError("The SQL file is empty.")
-            statements = sqlparse.split(content)
-        return statements
-    except Exception as e:
-        console.print(f"[red]Error reading SQL file: {e}[/red]")
-        raise
-async def process_sql_statements(statements):
-    with tqdm(total=len(statements), desc="Executing SQL statements", unit="statement") as pbar:
-        for statement in statements:
-            try:
-                future = scylla_app.session.execute_async(statement)
-                future.result()  # Wait for the result
-                console.print(f"[green]Executed SQL statement: {statement}[/green]")
-            except Exception as e:
-                console.print(f"[red]Error executing SQL statement: {e}[/red]")
-                console.print(f"[yellow]Problematic statement: {statement}[/yellow]")
-            pbar.update(1)  # Update progress bar
-async def insert_records_in_batches(records, file_path, batch_size=50, concurrency=10):
-    semaphore = asyncio.Semaphore(concurrency)
-    tasks = []
-    total_batches = (len(records) + batch_size - 1) // batch_size
-    with tqdm(total=total_batches, desc="Inserting records", unit="batch") as pbar:
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            tasks.append(insert_batch_with_semaphore(batch, file_path, pbar, semaphore, total_batches - (i // batch_size)))
-        await asyncio.gather(*tasks)
 
-async def insert_batch_with_semaphore(batch, file_path, pbar, semaphore, batches_left):
-    async with semaphore:
-        await insert_batch(batch, file_path, pbar, batches_left)
-
-async def insert_data_to_scylla(file_path, batch_size=50):  # Reduced batch size to 50
+async def search_npd_data(scylla_app, max_results=None):
     try:
-        if isinstance(file_path, str) and file_path.endswith('.txt'):
-            for chunk_df in read_combolist_txt(file_path):
-                records = chunk_df.to_dict(orient='records')
-                await insert_records_in_batches(records, file_path, batch_size)
-        elif isinstance(file_path, str) and file_path.endswith('.csv'):
-            df = read_malformed_csv(file_path)
-            records = df.to_dict(orient='records')
-            await insert_records_in_batches(records, file_path, batch_size)
-        else:
-            raise ValueError("Invalid file path or unsupported file type")
-        console.print(f"[green]Data inserted successfully from: {file_path}[/green]")
+        query_conditions = []
+        params = []
+
+        # Prompt the user for required parameters
+        first_name = input("Enter first name (or leave blank): ").strip()
+        last_name = input("Enter last name (or leave blank): ").strip()
+        city = input("Enter city (or leave blank): ").strip()
+
+        # Ensure at least one required parameter is provided
+        if not first_name and not last_name and not city:
+            console.print("[red]Error: At least one of 'first_name', 'last_name', or 'city' must be provided.[/red]")
+            return
+
+        # Add conditions based on provided parameters
+        if first_name:
+            query_conditions.append("(first_name = ? OR first_name = ? OR first_name = ?)")
+            params.extend([first_name.lower(), first_name.capitalize(), first_name.upper()])
+        if last_name:
+            query_conditions.append("(last_name = ? OR last_name = ? OR last_name = ?)")
+            params.extend([last_name.lower(), last_name.capitalize(), last_name.upper()])
+        if city:
+            query_conditions.append("(city = ? OR city = ? OR city = ?)")
+            params.extend([city.lower(), city.capitalize(), city.upper()])
+
+        # Construct the query
+        query = f"SELECT email, data FROM user_data WHERE {' AND '.join(query_conditions)} ALLOW FILTERING"
+
+        if max_results:
+            query += f" LIMIT {max_results}"
+
+        console.print(f"[cyan]Executing query: {query}[/cyan]")
+        console.print(f"[cyan]With parameters: {params}[/cyan]")
+
+        prepared_stmt = scylla_app.session.prepare(query)
+        rows = scylla_app.session.execute(prepared_stmt, params)
+
+        results = [{'email': row.email, **json.loads(row.data)} for row in rows]
+
+        # Filter results in application code
+        filtered_results = []
+        for result in results:
+            if any(first_name.lower() in str(value).lower() for value in result.values()) or \
+               any(last_name.lower() in str(value).lower() for value in result.values()) or \
+               any(city.lower() in str(value).lower() for value in result.values()):
+                filtered_results.append(result)
+
+        if filtered_results:
+            console.print(f"[bold green]Found {len(filtered_results)} results:[/bold green]")
+            for i, result in enumerate(filtered_results, 1):
+                table = Table(title=f"Result {i}", box=box.ROUNDED)
+                for key, value in result.items():
+                    table.add_row(str(key), str(value))
+                console.print(table)
+                console.print()  # Add a blank line between results
+            
+            save_results = Prompt.ask(
+                "Do you want to save the search results to a file?",
+                choices=["y", "n"],
+                default="n"
+            ) == "y"
+            
+            if save_results:
+                save_results_to_file(filtered_results)
+            else:
+             console.print("[yellow]No matching records found.[/yellow]")
+            
     except Exception as e:
-        console.print(f"[red]Error inserting data into ScyllaDB: {e}[/red]")
-        console.print(f"[yellow]Error details: {str(e)}[/yellow]")
+        console.print(f"[red]Error searching ScyllaDB: {str(e)}[/red]")
+        if 'query' in locals():
+            console.print(f"[yellow]Query attempted: {query}[yellow]")
+        if 'params' in locals():
+            console.print(f"[yellow]Parameters: {params}[yellow]")
+
     finally:
         gc.collect()
-async def insert_batch(batch, file_path, pbar, batches_left):
-    skipped_count = 0
-    batch_stmt = BatchStatement()
-    for record in batch:
-        record['source'] = file_path
-        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number'])) 
-        username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number', 'UID', 'uid']))
-        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first name' , 'first', 'fname', 'f_name', 'given_name', 'given', 'gname', 'g_name', 'forename', 'fore_name', 'fore name', 'name', 'name_first', 'namefirst', 'name first', 'name_given', 'namegiven', 'name given']))
-        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last name', 'last', 'lname', 'l_name', 'family_name', 'family', 'sname', 's_name', 'surname', 'sur_name']))
-        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone number', 'call', 'phone', 'telephone', 'contact', 'number', 'cell', 'mobile', 'cellphone', 'cellular']))
 
-       
-        # Use email, username, first_name, last_name, or phone_number as the primary key
-        primary_keys = []
-        if email:
-            primary_keys.append(email)
-        if username:
-            primary_keys.append(username)
-        if first_name and last_name:
-            primary_keys.append(f"{first_name} {last_name}")
-        if phone_number:
-            primary_keys.append(phone_number)
-
-        if not primary_keys:
-            skipped_count += 1
-            continue
-
-        # Convert all values to strings and remove empty values
-        data = {k: convert_to_string(v) for k, v in record.items()}
-        data = {k: v for k, v in data.items() if v}
-
-        try:
-            for primary_key in primary_keys:
-                batch_stmt.add(scylla_app.insert_stmt, (email, username, first_name, last_name, phone_number, data))
-        except Exception as e:
-            console.print(f"[red]Error adding record to batch: {e}[/red]")
-            console.print(f"[yellow]Problematic record: {record}[/yellow]")
-
-    try:
-        future = scylla_app.session.execute_async(batch_stmt)
-        future.result()  # Wait for the result
-        pbar.update(1)  # Update progress bar
-    except Exception as e:
-        console.print(f"[red]Error executing batch: {e}[/red]")
-
-    if skipped_count > 0:
-        console.print(f"[yellow]Skipped {skipped_count} records due to missing primary key.[/yellow]")
+async def main():
+    scylla_app = ScyllaApp()
+    while True:
+        console.print(Panel.fit(
+            "[bold cyan]Select mode:[/bold cyan]\n"
+            "1. Load a single file (CSV or TXT)\n"
+            "2. Load all files in a directory (CSV or TXT)\n"
+            "3. Load multiple selected files (CSV or TXT)\n"
+            "4. Search ScyllaDB\n"
+            "5. Search NPD Data\n"
+            "6. Exit",
+            title="ScyllaDB Data Manager",
+            border_style="bold green"
+        ))
         
-def read_json(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        data = json.load(file)
-    return data
+        mode = Prompt.ask("Enter mode", choices=["1", "2", "3", "4", "5", "6"])
 
-def process_json_data(data, file_path):
-    records = []
-    for record in data:
-        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
-        username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
-        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first name' , 'first', 'fname', 'f_name', 'given_name', 'given', 'gname', 'g_name', 'forename', 'fore_name', 'fore name', 'name', 'name_first', 'namefirst', 'name first', 'name_given', 'namegiven', 'name given']))
-        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last name', 'last', 'lname', 'l_name', 'family_name', 'family', 'sname', 's_name', 'surname', 'sur_name']))
-        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone number', 'call', 'phone', 'telephone', 'contact', 'number', 'cell', 'mobile', 'cellphone', 'cellular']))
+        if mode == '1':
+            await load_single_file(scylla_app)
+        elif mode == '2':
+            await load_all_files(scylla_app)
+        elif mode == '3':
+            await load_multiple_files(scylla_app)
+        elif mode == '4':
+            search_input = input("Enter search terms (e.g., \"email:example@gmail.com\" or \"first_name:John\"): ")
+            await search_scylla(search_input, scylla_app)
+        elif mode == '5':
+            await search_npd_data(scylla_app)
+        elif mode == '6':
+            console.print("[yellow]Exiting...[/yellow]")
+            break
+        else:
+            console.print("[red]Invalid mode selected. Please try again.[/red]")
 
-        # Use email, username, first_name, last_name, or phone_number as the primary key
-        primary_keys = []
-        if email:
-            primary_keys.append(email)
-        if username:
-            primary_keys.append(username)
-        if first_name and last_name:
-            primary_keys.append(f"{first_name} {last_name}")
-        if phone_number:
-            primary_keys.append(phone_number)
-
-        if not primary_keys:
-            console.print("[yellow]Skipping record due to missing keys[/yellow]")
-            continue
-
-        # Convert all values to strings and remove empty values
-        data = {k: convert_to_string(v) for k, v in record.items()}
-        data = {k: v for k, v in data.items() if v}
-
-        records.append({
-            'email': email,
-            'username': username,
-            'first_name': first_name,
-            'last_name': last_name,
-            'phone_number': phone_number,
-            'data': data,
-            'source': file_path
-        })
-
-    return records
-
-def partition_and_insert_json(file_path, chunk_size=10000):
-    data = read_json(file_path)
-    records = process_json_data(data, file_path)
-    asyncio.run(insert_records_in_batches(records, file_path, chunk_size))
-def save_results_to_file(results):
-    Tk().withdraw()
-    
-    file_path = filedialog.asksaveasfilename(
-        title="Save Results",
-        defaultextension=".csv",
-        filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-    )
-    
-    if file_path:
-        df = pd.DataFrame(results)
-        df.to_csv(file_path, index=False)
-        console.print(f"[green]Results saved to {file_path}[/green]")
-    else:
-        console.print("[yellow]Save operation cancelled.[/yellow]")
-
-def read_combolist_txt(file_path, chunk_size=10000):
-    def chunk_generator(file, chunk_size):
-        chunk = []
-        for line in file:
-            chunk.append(line.strip())
-            if len(chunk) >= chunk_size:
-                yield chunk
-                chunk = []
-        if chunk:
-            yield chunk
-
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for chunk in chunk_generator(file, chunk_size):
-            chunk_data = []
-            for line in chunk:
-                try:
-                    # Handle the {email}:{password} format
-                    email, password = line.split(':', 1)
-                    email = email.strip().strip('"')
-                    password = password.strip().strip('"')
-                    chunk_data.append({'email': email, 'hashed_password': password})
-                except ValueError:
-                    console.print(f"[yellow]Skipping malformed line: {line}[/yellow]")
-                    continue
-            yield pd.DataFrame(chunk_data)
-def partition_and_insert_txt(file_path, chunk_size=10000):
-    for chunk_df in read_combolist_txt(file_path, chunk_size):
-        records = chunk_df.to_dict(orient='records')
-        asyncio.run(insert_records_in_batches(records, file_path))
-def load_single_file():
-    Tk().withdraw()
-    file_path = filedialog.askopenfilename(
-        title="Select a File",
-        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt"), ("JSON Files", "*.json"), ("SQL Files", "*.sql")]
-    )
-    if file_path:
-        try:
-            if file_path.endswith('.txt'):
-                partition_and_insert_txt(file_path)
-            elif file_path.endswith('.csv'):
-                asyncio.run(insert_data_to_scylla(file_path))
-            elif file_path.endswith('.json'):
-                partition_and_insert_json(file_path)
-            elif file_path.endswith('.sql'):
-                statements = read_sql(file_path)
-                asyncio.run(process_sql_statements(statements))
-            else:
-                console.print("[red]Unsupported file type selected.[/red]")
-        except Exception as e:
-            console.print(f"[red]Error processing file: {e}[/red]")
-    else:
-        console.print("[yellow]No file selected.[/yellow]")
-def load_all_files():
-    Tk().withdraw()
-    directory = filedialog.askdirectory(title="Select Directory Containing Files")
-    if directory:
-        for file_name in os.listdir(directory):
-            if file_name.endswith(".csv") or file_name.endswith(".txt") or file_name.endswith(".json"):
-                file_path = os.path.join(directory, file_name)
-                if file_path.endswith('.txt'):
-                    partition_and_insert_txt(file_path)
-                elif file_path.endswith('.csv'):
-                    asyncio.run(insert_data_to_scylla(file_path))
-                elif file_path.endswith('.json'):
-                    partition_and_insert_json(file_path)
-                else:
-                    console.print(f"[red]Unsupported file type: {file_path}[/red]")
-    else:
-        console.print("[yellow]No directory selected.[/yellow]")
-def load_multiple_files():
-    Tk().withdraw()
-    file_paths = filedialog.askopenfilenames(
-        title="Select Files",
-        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt"), ("JSON Files", "*.json")]
-    )
-    if file_paths:
-        for file_path in file_paths:
-            if file_path.endswith('.txt'):
-                partition_and_insert_txt(file_path)
-            elif file_path.endswith('.csv'):
-                asyncio.run(insert_data_to_scylla(file_path))
-            elif file_path.endswith('.json'):
-                partition_and_insert_json(file_path)
-            else:
-                console.print(f"[red]Unsupported file type: {file_path}[/red]")
-    else:
-        console.print("[yellow]No files selected.[/yellow]")
-def main():
-    try:
-        console.print("[cyan]Initializing ScyllaApp...[/cyan]")
-        scylla_app = ScyllaApp()
-        console.print("[green]ScyllaApp initialized successfully[/green]")
-
-        while True:
-            console.print(Panel.fit(
-                "[bold cyan]Select mode:[/bold cyan]\n"
-                "1. Load a single file (CSV or TXT)\n"
-                "2. Load all files in a directory (CSV or TXT)\n"
-                "3. Load multiple selected files (CSV or TXT)\n"
-                "4. Search ScyllaDB\n"
-                "5. Exit",
-                title="ScyllaDB Data Manager",
-                border_style="bold green"
-            ))
-            
-            mode = Prompt.ask("Enter mode", choices=["1", "2", "3", "4", "5"])
-
-            if mode == '1':
-                load_single_file()
-            elif mode == '2':
-                load_all_files()
-            elif mode == '3':
-                load_multiple_files()
-            elif mode == '4':
-                 search_input = input("Enter search terms (e.g., \"email:example@gmail.com\" or \"first_name:John\"): ")
-                 asyncio.run(search_scylla(search_input))
-            elif mode == '5':
-                console.print("[yellow]Exiting...[/yellow]")
-                break
-            else:
-                console.print("[red]Invalid mode selected. Please try again.[/red]")
-    except Exception as e:
-        console.print(f"[red]Error: {str(e)}[/red]")
-    finally:
-        scylla_app.close()
+    scylla_app.close()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
