@@ -456,22 +456,96 @@ async def search_scylla(search_input, scylla_app, max_results=None):
         if ':' in search_input:
             field, value = search_input.split(':', 1)
             if field in primary_and_alternative_keys:
-                query_conditions.append(f"{field} = ?")
-                params.extend([value.lower(), value.capitalize(), value.upper()])
+                query_conditions.append(f"{field} = '{value.lower()}'")
+                query_conditions.append(f"{field} = '{value.capitalize()}'")
+                query_conditions.append(f"{field} = '{value.upper()}'")
             else:
-                query_conditions.append(f"data CONTAINS KEY '{field}' AND data['{field}'] = ?")
-                params.extend([value.lower(), value.capitalize(), value.upper()])
+                query_conditions.append(f"data CONTAINS KEY '{field}' AND data['{field}'] = '{value.lower()}'")
+                query_conditions.append(f"data CONTAINS KEY '{field}' AND data['{field}'] = '{value.capitalize()}'")
+                query_conditions.append(f"data CONTAINS KEY '{field}' AND data['{field}'] = '{value.upper()}'")
         else:
-            query_conditions.append("data CONTAINS ?")
-            params.extend([search_input.lower(), search_input.capitalize(), search_input.upper()])
+            query_conditions.append(f"data CONTAINS '{search_input.lower()}'")
+            query_conditions.append(f"data CONTAINS '{search_input.capitalize()}'")
+            query_conditions.append(f"data CONTAINS '{search_input.upper()}'")
 
         # Ensure preceding primary key columns are included
         if 'city' in [cond.split('=')[0].strip() for cond in query_conditions]:
             if 'username' not in [cond.split('=')[0].strip() for cond in query_conditions]:
                 # Prompt the user to enter the username
                 username = input("Enter username: ")
-                query_conditions.append("username = ?")
-                params.extend([username.lower(), username.capitalize(), username.upper()])
+                query_conditions.append(f"username = '{username.lower()}'")
+                query_conditions.append(f"username = '{username.capitalize()}'")
+                query_conditions.append(f"username = '{username.upper()}'")
+
+        # Construct the queries
+        queries = []
+        for condition in query_conditions:
+            if any(search_input.startswith(f"{key}:") for key in primary_and_alternative_keys):
+                query = f"SELECT email, data FROM user_data WHERE {condition}"
+            else:
+                query = f"SELECT email, data FROM user_data WHERE {condition} ALLOW FILTERING"
+            if max_results:
+                query += f" LIMIT {max_results}"
+            queries.append(query)
+
+        results = []
+        for query in queries:
+            console.print(f"[cyan]Executing query: {query}[/cyan]")
+            rows = scylla_app.session.execute(query)
+            results.extend([{'email': row.email, **json.loads(row.data)} for row in rows if 'G:/Fraud/Breaches/NPD/' not in row.data])
+
+        if results:
+            console.print(f"[bold green]Found {len(results)} results:[/bold green]")
+            for i, result in enumerate(results, 1):
+                table = Table(title=f"Result {i}", box=box.ROUNDED)
+                for key, value in result.items():
+                    table.add_row(str(key), str(value))
+                console.print(table)
+                console.print()  # Add a blank line between results
+            
+            save_results = Prompt.ask(
+                "Do you want to save the search results to a file?",
+                choices=["y", "n"],
+                default="n"
+            ) == "y"
+            
+            if save_results:
+                save_results_to_file(results)
+        else:
+            console.print("[yellow]No matching records found.[/yellow]")
+            
+    except Exception as e:
+        console.print(f"[red]Error searching ScyllaDB: {str(e)}[/red]")
+        if 'query' in locals():
+            console.print(f"[yellow]Query attempted: {query}[yellow]")
+
+    finally:
+        gc.collect()
+async def search_npd_data(scylla_app, max_results=None):
+    try:
+        query_conditions = []
+        params = []
+
+        # Prompt the user for required parameters
+        first_name = input("Enter first name (or leave blank): ").strip()
+        last_name = input("Enter last name (or leave blank): ").strip()
+        city = input("Enter city (or leave blank): ").strip()
+
+        # Ensure at least one required parameter is provided
+        if not first_name and not last_name and not city:
+            console.print("[red]Error: At least one of 'first_name', 'last_name', or 'city' must be provided.[/red]")
+            return
+
+        # Add conditions based on provided parameters
+        if first_name:
+            query_conditions.append("first_name = ?")
+            params.append(first_name)
+        if last_name:
+            query_conditions.append("last_name = ?")
+            params.append(last_name)
+        if city:
+            query_conditions.append("city = ?")
+            params.append(city)
 
         # Construct the query
         query = f"SELECT email, data FROM user_data WHERE {' AND '.join(query_conditions)} ALLOW FILTERING"
@@ -485,8 +559,7 @@ async def search_scylla(search_input, scylla_app, max_results=None):
         prepared_stmt = scylla_app.session.prepare(query)
         rows = scylla_app.session.execute(prepared_stmt, params)
 
-        # Filter out results from the NPD directory
-        results = [{'email': row.email, **json.loads(row.data)} for row in rows if 'G:/Fraud/Breaches/NPD/' not in row.data]
+        results = [{'email': row.email, **json.loads(row.data)} for row in rows]
 
         if results:
             console.print(f"[bold green]Found {len(results)} results:[/bold green]")
@@ -517,85 +590,6 @@ async def search_scylla(search_input, scylla_app, max_results=None):
 
     finally:
         gc.collect()
-
-async def search_npd_data(scylla_app, max_results=None):
-    try:
-        query_conditions = []
-        params = []
-
-        # Prompt the user for required parameters
-        first_name = input("Enter first name (or leave blank): ").strip()
-        last_name = input("Enter last name (or leave blank): ").strip()
-        city = input("Enter city (or leave blank): ").strip()
-
-        # Ensure at least one required parameter is provided
-        if not first_name and not last_name and not city:
-            console.print("[red]Error: At least one of 'first_name', 'last_name', or 'city' must be provided.[/red]")
-            return
-
-        # Add conditions based on provided parameters
-        if first_name:
-            query_conditions.append("(first_name = ? OR first_name = ? OR first_name = ?)")
-            params.extend([first_name.lower(), first_name.capitalize(), first_name.upper()])
-        if last_name:
-            query_conditions.append("(last_name = ? OR last_name = ? OR last_name = ?)")
-            params.extend([last_name.lower(), last_name.capitalize(), last_name.upper()])
-        if city:
-            query_conditions.append("(city = ? OR city = ? OR city = ?)")
-            params.extend([city.lower(), city.capitalize(), city.upper()])
-
-        # Construct the query
-        query = f"SELECT email, data FROM user_data WHERE {' AND '.join(query_conditions)} ALLOW FILTERING"
-
-        if max_results:
-            query += f" LIMIT {max_results}"
-
-        console.print(f"[cyan]Executing query: {query}[/cyan]")
-        console.print(f"[cyan]With parameters: {params}[/cyan]")
-
-        prepared_stmt = scylla_app.session.prepare(query)
-        rows = scylla_app.session.execute(prepared_stmt, params)
-
-        results = [{'email': row.email, **json.loads(row.data)} for row in rows]
-
-        # Filter results in application code
-        filtered_results = []
-        for result in results:
-            if any(first_name.lower() in str(value).lower() for value in result.values()) or \
-               any(last_name.lower() in str(value).lower() for value in result.values()) or \
-               any(city.lower() in str(value).lower() for value in result.values()):
-                filtered_results.append(result)
-
-        if filtered_results:
-            console.print(f"[bold green]Found {len(filtered_results)} results:[/bold green]")
-            for i, result in enumerate(filtered_results, 1):
-                table = Table(title=f"Result {i}", box=box.ROUNDED)
-                for key, value in result.items():
-                    table.add_row(str(key), str(value))
-                console.print(table)
-                console.print()  # Add a blank line between results
-            
-            save_results = Prompt.ask(
-                "Do you want to save the search results to a file?",
-                choices=["y", "n"],
-                default="n"
-            ) == "y"
-            
-            if save_results:
-                save_results_to_file(filtered_results)
-            else:
-             console.print("[yellow]No matching records found.[/yellow]")
-            
-    except Exception as e:
-        console.print(f"[red]Error searching ScyllaDB: {str(e)}[/red]")
-        if 'query' in locals():
-            console.print(f"[yellow]Query attempted: {query}[yellow]")
-        if 'params' in locals():
-            console.print(f"[yellow]Parameters: {params}[yellow]")
-
-    finally:
-        gc.collect()
-
 async def main():
     scylla_app = ScyllaApp()
     while True:
