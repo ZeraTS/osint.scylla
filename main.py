@@ -15,6 +15,7 @@ from cassandra.query import SimpleStatement, BatchStatement
 from cassandra.policies import TokenAwarePolicy, DCAwareRoundRobinPolicy
 from cassandra import ConsistencyLevel
 import asyncio
+import aiofiles
 import gc
 from datetime import datetime
 import json
@@ -24,27 +25,36 @@ console = Console()
 # ScyllaDB connection setup
 class ScyllaApp:
     def __init__(self, contact_points=['localhost'], port=9042, keyspace='user_data'):
-        profile = ExecutionProfile(
-            load_balancing_policy=TokenAwarePolicy(DCAwareRoundRobinPolicy()),
-            consistency_level=ConsistencyLevel.LOCAL_QUORUM
-        )
-        self.cluster = Cluster(
-            contact_points=contact_points,
-            port=port,
-            execution_profiles={EXEC_PROFILE_DEFAULT: profile}
-        )
-        try:
-            self.session = self.cluster.connect()
-            console.print("[green]Connected to ScyllaDB cluster[/green]")
-        except Exception as e:
-            console.print(f"[red]Error connecting to ScyllaDB cluster: {str(e)}[/red]")
-            raise
+    # Create a single execution profile with optimized settings
+     profile = ExecutionProfile(
+        load_balancing_policy=TokenAwarePolicy(DCAwareRoundRobinPolicy()),
+        consistency_level=ConsistencyLevel.ONE,  # Using ONE for better performance
+        request_timeout=60
+     )
 
-        self.create_keyspace_if_not_exists(keyspace)
-        self.session.set_keyspace(keyspace)
-        self.create_table_if_not_exists()
-        self.create_indexes()
-        self.prepare_statements()
+     self.cluster = Cluster(
+        contact_points=contact_points,
+        port=port,
+        execution_profiles={EXEC_PROFILE_DEFAULT: profile},
+        protocol_version=4,
+        compression=True,
+        control_connection_timeout=10,
+        connect_timeout=10,
+        executor_threads=16  # Increase thread pool size
+    )
+     try:
+        self.session = self.cluster.connect()
+        console.print("[green]Connected to ScyllaDB cluster[/green]")
+     except Exception as e:
+        console.print(f"[red]Error connecting to ScyllaDB cluster: {str(e)}[/red]")
+        raise
+
+     self.create_keyspace_if_not_exists(keyspace)
+     self.session.set_keyspace(keyspace)
+     self.create_table_if_not_exists()
+     self.create_indexes()
+     self.prepare_statements()
+
 
     def close(self):
         """Close the cluster connection"""
@@ -204,32 +214,132 @@ def confirm_partition(file_path, threshold_kb=150000):
         ) == "y"
     return False
 
-def read_malformed_csv(file_path, delimiter=','):
+def read_malformed_csv(file_path, delimiter=',', chunksize=None):
+    """Read CSV file with support for chunked reading and multiple encodings"""
     cleaned_data = []
     encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252', 'utf-16', 'utf-32']
+    
     for encoding in encodings:
         try:
-            with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
-                reader = csv.reader(file, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
-                headers = next(reader, None)  # Read the first row as headers
-                if headers:
-                    cleaned_data.append(headers)
-                for row in reader:
-                    try:
-                        cleaned_data.append(row)
-                    except csv.Error as e:
-                        console.print(f"[red]Error processing row {reader.line_num}: {e}[/red]")
-                        continue
-            break
+            if chunksize:
+                # Read in chunks using pandas
+                return pd.read_csv(
+                    file_path,
+                    encoding=encoding,
+                    chunksize=chunksize,
+                    on_bad_lines='skip',
+                    low_memory=False,
+                    engine='python'
+                )
+            else:
+                # Read entire file
+                with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
+                    reader = csv.reader(file, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+                    headers = next(reader, None)
+                    if headers:
+                        cleaned_data.append(headers)
+                    for row in reader:
+                        try:
+                            cleaned_data.append(row)
+                        except csv.Error as e:
+                            console.print(f"[red]Error processing row: {e}[/red]")
+                            continue
+                return pd.DataFrame(cleaned_data[1:], columns=cleaned_data[0])
+                
         except UnicodeDecodeError:
-            console.print(f"[yellow]Failed to decode file with encoding: {encoding}. Trying next encoding...[/yellow]")
+            console.print(f"[yellow]Failed to decode with {encoding}, trying next encoding...[/yellow]")
             continue
-    else:
-        raise UnicodeDecodeError(f"Unable to decode the file with any of the provided encodings: {encodings}")
+        except Exception as e:
+            console.print(f"[red]Error reading file with {encoding}: {e}[/red]")
+            continue
+    
+    raise UnicodeDecodeError(f"Unable to decode the file with any of these encodings: {encodings}")
 
-    df = pd.DataFrame(cleaned_data[1:], columns=cleaned_data[0])
-    return df
-
+def read_malformed_csv(file_path, delimiter=',', chunksize=None):
+    """Read CSV file with support for chunked reading and multiple encodings"""
+    cleaned_data = []
+    encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252', 'utf-16', 'utf-32']
+    
+    for encoding in encodings:
+        try:
+            if chunksize:
+                # Read in chunks using pandas
+                return pd.read_csv(
+                    file_path,
+                    encoding=encoding,
+                    chunksize=chunksize,
+                    on_bad_lines='skip',
+                    low_memory=False,
+                    engine='python'
+                )
+            else:
+                # Read entire file
+                with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
+                    reader = csv.reader(file, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+                    headers = next(reader, None)
+                    if headers:
+                        cleaned_data.append(headers)
+                    for row in reader:
+                        try:
+                            cleaned_data.append(row)
+                        except csv.Error as e:
+                            console.print(f"[red]Error processing row: {e}[/red]")
+                            continue
+                return pd.DataFrame(cleaned_data[1:], columns=cleaned_data[0])
+                
+        except UnicodeDecodeError:
+            console.print(f"[yellow]Failed to decode with {encoding}, trying next encoding...[/yellow]")
+            continue
+        except Exception as e:
+            console.print(f"[red]Error reading file with {encoding}: {e}[/red]")
+            continue
+    
+    raise UnicodeDecodeError(f"Unable to decode the file with any of these encodings: {encodings}")
+async def process_file(file_path, scylla_app):
+    """Process file with chunked reading for large files"""
+    try:
+        if file_path.endswith('.csv'):
+            file_size = os.path.getsize(file_path)
+            
+            # Use chunked reading for large files (> 100MB)
+            if file_size > 100_000_000:  # 100MB
+                chunk_iterator = await asyncio.to_thread(
+                    read_malformed_csv, 
+                    file_path, 
+                    chunksize=10000  # Corrected argument name
+                )
+                
+                for chunk in chunk_iterator:
+                    records = chunk.to_dict(orient='records')
+                    await insert_records_in_batches(records, file_path, scylla_app)
+            else:
+                # Read entire file at once for smaller files
+                df = await asyncio.to_thread(read_malformed_csv, file_path)
+                records = df.to_dict(orient='records')
+                await insert_records_in_batches(records, file_path, scylla_app)
+                
+        elif file_path.endswith('.txt'):
+            async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='replace') as file:
+                records = []
+                async for line in file:
+                    try:
+                        record = json.loads(line)
+                        records.append(record)
+                        if len(records) >= 10000:  # Process in chunks
+                            await insert_records_in_batches(records, file_path, scylla_app)
+                            records = []
+                    except json.JSONDecodeError:
+                        continue
+                
+                # Process remaining records
+                if records:
+                    await insert_records_in_batches(records, file_path, scylla_app)
+        else:
+            console.print(f"[red]Unsupported file type: {file_path}[/red]")
+            
+    except Exception as e:
+        console.print(f"[red]Error processing file {file_path}: {str(e)}[/red]")
+        console.print("[yellow]Attempting to continue with next file...[/yellow]")
 async def load_all_files(scylla_app):
     root = Tk()
     root.withdraw()  # Hide the root window
@@ -242,8 +352,7 @@ async def load_all_files(scylla_app):
                     await process_file(file_path, scylla_app)  # Directly await here
     else:
         console.print("[yellow]No directory selected.[/yellow]")
-  
-def insert_batch(batch, file_path, scylla_app, pbar):
+async def insert_batch(batch, file_path, scylla_app, pbar):
     skipped_count = 0
     batch_stmt = BatchStatement()
     existing_columns = set()
@@ -254,121 +363,312 @@ def insert_batch(batch, file_path, scylla_app, pbar):
         existing_columns = set(table_metadata.columns.keys())
     except Exception as e:
         console.print(f"[red]Error fetching table metadata: {e}[/red]")
+        return
 
     for record in batch:
-        record['source'] = file_path
-        email = convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number', 'Email']))
-        username = convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'user_id', 'userid', 'user-id', 'user id', 'account', 'acct', 'account_id', 'accountid', 'account-id', 'account id', 'account_number', 'accountnumber', 'account-number', 'account number']))
-        first_name = convert_to_string(get_value_from_record(record, ['first_name', 'first', 'fname', 'f_name', 'f-name', 'f name', 'given_name', 'givenname', 'given-name', 'given name', 'forename', 'fore_name', 'fore-name', 'fore name', 'fore_name', 'forename ']))
-        last_name = convert_to_string(get_value_from_record(record, ['last_name', 'last', 'lname', 'l_name', 'l-name', 'l name', 'family_name', 'familyname', 'family-name', 'family name', 'surname', 'sur_name', 'sur-name', 'sur name', 'sur_name', 'surname' ]))
-        phone_number = convert_to_string(get_value_from_record(record, ['phone_number', 'phone', 'telephone', 'tel', 'phone_number', 'phone-number', 'phone number', 'phone_no', 'phone-no', 'phone no', 'phone_num', 'phone-num', 'phone num', 'phone_num' ]))
-        city = convert_to_string(get_value_from_record(record, ['city', 'town', 'location', 'city_name', 'cityname', 'city-name', 'city name', 'city_town', 'citytown', 'city-town', 'city town', 'city_location', 'citylocation', 'city-location', 'city location' ]))
-        state = convert_to_string(get_value_from_record(record, ['state', 'province', 'region', 'state_province', 'stateprovince', 'state-province', 'state province', 'state_region', 'stateregion', 'state-region', 'state region', 'state_province_region' ]))
-        dob = convert_to_string(get_value_from_record(record, ['dob', 'date_of_birth', 'dateofbirth', 'date-of-birth', 'date of birth', 'birth_date', 'birthdate', 'birth-date', 'birth date', 'dob_date', 'dob-date', 'dob date', 'dob_date', 'dob_date', 'dobdate' ]))
-                                                               
-        # Add lowercase versions
-        email_lower = email.lower() if email else None
-        username_lower = username.lower() if username else None
+        try:
+            # Convert record to proper format with standard fields
+            formatted_record = {
+                'email': convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'email_address', 'emailaddress', 'email-address', 'email address', 'user_email', 'useremail', 'user-email', 'user email', 'Email'])),
+                'username': convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login', 'Username'])),
+                'first_name': convert_to_string(get_value_from_record(record, ['first_name', 'first', 'fname', 'f_name', 'FirstName'])),
+                'last_name': convert_to_string(get_value_from_record(record, ['last_name', 'last', 'lname', 'l_name', 'LastName'])),
+                'phone_number': convert_to_string(get_value_from_record(record, ['phone_number', 'phone', 'telephone', 'tel', 'Phone'])),
+                'city': convert_to_string(get_value_from_record(record, ['city', 'town', 'location', 'City'])),
+                'state': convert_to_string(get_value_from_record(record, ['state', 'province', 'region', 'State'])),
+                'dob': convert_to_string(get_value_from_record(record, ['dob', 'date_of_birth', 'dateofbirth', 'birth_date', 'DOB'])),
+                'source': file_path,
+                'data': json.dumps(record)  # Store complete record as JSON
+            }
 
-        # Check for new columns and alter table if necessary
-        for key in record.keys():
-            if key not in existing_columns:
-                try:
-                    scylla_app.session.execute(f"ALTER TABLE user_data ADD {key} text")
-                    existing_columns.add(key)
-                    console.print(f"[green]Added new column '{key}' to table 'user_data'[/green]")
-                except Exception as e:
-                    console.print(f"[red]Error adding column '{key}': {e}[/red]")
+            # Ensure email is present
+            if not formatted_record['email']:
+                skipped_count += 1
+                continue
 
-        # Ensure email is present
-        if not email:
-            skipped_count += 1
-            console.print(f"[yellow]Skipped record due to missing email: {record}[/yellow]")
+            # Add any new columns found in the record
+            for key in record.keys():
+                if key not in existing_columns and key not in formatted_record:
+                    sanitized_key = re.sub(r'[^a-zA-Z0-9_]', '_', key.lower())
+                    try:
+                        alter_query = f"ALTER TABLE user_data ADD {sanitized_key} text"
+                        await asyncio.to_thread(scylla_app.session.execute, alter_query)
+                        existing_columns.add(sanitized_key)
+                        formatted_record[sanitized_key] = convert_to_string(record[key])
+                    except Exception as e:
+                        if "Invalid column name" not in str(e):
+                            console.print(f"[red]Error adding column '{sanitized_key}': {e}[/red]")
+                        continue
+
+            # Prepare and execute the insert statement
+            columns = ', '.join(formatted_record.keys())
+            placeholders = ', '.join(['?'] * len(formatted_record))
+            insert_stmt = scylla_app.session.prepare(
+                f"INSERT INTO user_data ({columns}) VALUES ({placeholders})"
+            )
+
+            batch_stmt.add(insert_stmt, tuple(formatted_record.values()))
+
+        except Exception as e:
+            console.print(f"[red]Error processing record: {e}[/red]")
             continue
 
-        # Prepare the insert statement with all columns
-        columns = ', '.join(record.keys())
-        placeholders = ', '.join(['?'] * len(record))
-        insert_stmt = scylla_app.session.prepare(f"INSERT INTO user_data ({columns}) VALUES ({placeholders})")
-
-        try:
-            batch_stmt.add(insert_stmt, tuple(record.values()))
-        except Exception as e:
-            pbar.update(len(batch))
-            console.print(f"[red]Error adding record to batch: {e}[/red]")
-            console.print(f"[yellow]Problematic record: {record}[/yellow]")
-
     try:
-        scylla_app.session.execute(batch_stmt)
-        pbar.update(len(batch))  # Update the progress bar after each batch
+        await asyncio.to_thread(scylla_app.session.execute, batch_stmt)
+        pbar.update(len(batch))
     except Exception as e:
         console.print(f"[red]Error executing batch: {e}[/red]")
 
     if skipped_count > 0:
         console.print(f"[yellow]Skipped {skipped_count} records due to missing email.[/yellow]")
 async def insert_records_in_batches(records, file_path, scylla_app, batch_size=1000):
+    """Insert records in optimized batches"""
     try:
+        chunks = [records[i:i + batch_size] for i in range(0, len(records), batch_size)]
+        tasks = []
+        
         with tqdm(total=len(records), desc=f"Processing {file_path}") as pbar:
-            tasks = []  # List to hold all tasks for asyncio.gather
-            for i in range(0, len(records), batch_size):
-                batch = records[i:i + batch_size]
-                # Prepare a task for each batch
-                task = asyncio.to_thread(insert_batch, batch, file_path, scylla_app, pbar)
+            for chunk in chunks:
+                task = asyncio.create_task(insert_batch(chunk, file_path, scylla_app, pbar))
                 tasks.append(task)
+                
+                # Process tasks in smaller groups to manage memory
+                if len(tasks) >= 5:
+                    await asyncio.gather(*tasks)
+                    tasks = []
             
-            # Use asyncio.gather to run all tasks concurrently
-            await asyncio.gather(*tasks)
+            # Process remaining tasks
+            if tasks:
+                await asyncio.gather(*tasks)
+            
     except Exception as e:
-        console.print(f"[red]Error processing batches: {e}[/red]")
+        console.print(f"[red]Error in batch insertion: {e}[/red]")
+
+async def process_chunk(chunk, file_path, scylla_app, pbar):
+    """Process a single chunk of records"""
+    batch_stmt = BatchStatement()
+    processed_count = 0
+    
+    try:
+        # Get existing columns once for the chunk
+        table_metadata = scylla_app.cluster.metadata.keyspaces[scylla_app.session.keyspace].tables['user_data']
+        existing_columns = set(table_metadata.columns.keys())
+        
+        for record in chunk:
+            try:
+                formatted_record = {
+                    'email': convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'Email'])),
+                    'username': convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login'])),
+                    'first_name': convert_to_string(get_value_from_record(record, ['first_name', 'firstname', 'fname'])),
+                    'last_name': convert_to_string(get_value_from_record(record, ['last_name', 'lastname', 'lname'])),
+                    'phone_number': convert_to_string(get_value_from_record(record, ['phone_number', 'phone', 'telephone'])),
+                    'source': file_path,
+                    'data': json.dumps(record)
+                }
+                
+                if formatted_record['email']:
+                    columns = ', '.join(formatted_record.keys())
+                    placeholders = ', '.join(['?'] * len(formatted_record))
+                    insert_stmt = scylla_app.session.prepare(
+                        f"INSERT INTO user_data ({columns}) VALUES ({placeholders})"
+                    )
+                    batch_stmt.add(insert_stmt, tuple(formatted_record.values()))
+                    processed_count += 1
+                    
+            except Exception as e:
+                console.print(f"[red]Error processing record: {e}[/red]")
+                continue
+        
+        # Execute batch
+        await scylla_app.session.execute(batch_stmt)
+        pbar.update(processed_count)  # Update progress bar with actual processed records
+        
+    except Exception as e:
+        console.print(f"[red]Error processing chunk: {e}[/red]")
+
+def optimize_batch_size(file_size):
+    """Dynamically adjust batch size based on file size"""
+    if file_size > 1_000_000_000:  # 1GB
+        return 1000
+    elif file_size > 100_000_000:  # 100MB
+        return 2000
+    else:
+        return 5000
+
+async def process_large_file(file_path, scylla_app):
+    """Process large files with optimized memory usage"""
+    file_size = os.path.getsize(file_path)
+    batch_size = optimize_batch_size(file_size)
+    
+    try:
+        if file_path.endswith('.csv'):
+            total_rows = sum(1 for _ in open(file_path)) - 1
+            with tqdm(total=total_rows, desc=f"Processing {file_path}") as pbar:
+                async for chunk in read_csv_chunks(file_path, chunksize=batch_size):
+                    await insert_records_in_batches(chunk, file_path, scylla_app, batch_size)
+                    pbar.update(len(chunk))
+    except Exception as e:
+        console.print(f"[red]Error processing large file: {e}[/red]")
+def format_record(record, file_path, existing_columns):
+    formatted_record = {
+        'email': convert_to_string(get_value_from_record(record, ['email', 'mail', 'e-mail address', 'e-mail', 'Email'])),
+        'username': convert_to_string(get_value_from_record(record, ['username', 'user_name', 'user', 'login'])),
+        'first_name': convert_to_string(get_value_from_record(record, ['first_name', 'firstname', 'fname'])),
+        'last_name': convert_to_string(get_value_from_record(record, ['last_name', 'lastname', 'lname'])),
+        'phone_number': convert_to_string(get_value_from_record(record, ['phone_number', 'phone', 'telephone'])),
+        'city': convert_to_string(get_value_from_record(record, ['city', 'town', 'location'])),
+        'state': convert_to_string(get_value_from_record(record, ['state', 'province', 'region'])),
+        'dob': convert_to_string(get_value_from_record(record, ['dob', 'date_of_birth', 'birthdate'])),
+        'source': file_path,
+        'data': json.dumps(record)  # Store complete record as JSON
+    }
+
+    # Ensure email is present
+    if not formatted_record['email']:
+        return None
+
+    # Add any new columns found in the record
+    for key in record.keys():
+        if key not in existing_columns and key not in formatted_record:
+            sanitized_key = re.sub(r'[^a-zA-Z0-9_]', '_', key.lower())
+            formatted_record[sanitized_key] = convert_to_string(record[key])
+
+    return formatted_record
+
 async def load_single_file(scylla_app):
     root = Tk()
-    root.withdraw()  # Hide the root window
-    file_path = filedialog.askopenfilename(title="Select a file", filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")])
+    root.withdraw()
+    file_path = filedialog.askopenfilename(
+        title="Select a file",
+        filetypes=[("CSV Files", "*.csv"), ("Text Files", "*.txt")]
+    )
     if file_path:
-        await process_file(file_path, scylla_app)  # Await directly here
+        file_size = os.path.getsize(file_path)
+        if file_size > 100_000_000:  # 100MB
+            await process_large_file(file_path, scylla_app)
+        else:
+            await process_file(file_path, scylla_app)
     else:
         console.print("[yellow]No file selected.[/yellow]")
     root.destroy()
 
+async def update_table_schema(scylla_app, new_columns):
+    """Update the table schema with new columns."""
+    try:
+        table_metadata = scylla_app.cluster.metadata.keyspaces[scylla_app.session.keyspace].tables['user_data']
+        existing_columns = set(table_metadata.columns.keys())
+        
+        for column in new_columns:
+            if column not in existing_columns:
+                try:
+                    await scylla_app.session.execute(f"ALTER TABLE user_data ADD {column} text")
+                    console.print(f"[green]Added new column: {column}[/green]")
+                except Exception as e:
+                    if "Invalid column name" not in str(e):
+                        console.print(f"[red]Error adding column {column}: {e}[/red]")
+    except Exception as e:
+        console.print(f"[red]Error updating schema: {e}[/red]")
+
+async def read_csv_chunks(file_path, chunksize=10000):
+    """Read CSV file in chunks asynchronously"""
+    try:
+        for chunk in pd.read_csv(file_path, chunksize=chunksize):
+            yield chunk.to_dict(orient='records')
+    except Exception as e:
+        console.print(f"[red]Error reading CSV chunks: {e}[/red]")
+
+async def process_chunk(chunk, file_path, scylla_app, pbar):
+    """Process a single chunk of records"""
+    try:
+        await insert_records_in_batches(chunk, file_path, scylla_app)
+    except Exception as e:
+        console.print(f"[red]Error processing chunk: {e}[/red]")
+    finally:
+        pbar.update(len(chunk))
+
 async def process_file(file_path, scylla_app):
+    """Process file with chunked reading for large files"""
     try:
         if file_path.endswith('.csv'):
-            df = await asyncio.to_thread(read_malformed_csv, file_path)
-            records = df.to_dict(orient='records')
-            await insert_records_in_batches(records, file_path, scylla_app)
-        elif file_path.endswith('.txt'):
-            with open(file_path, 'r', encoding='utf-8') as infile:
-                records = [json.loads(line) for line in infile]
+            file_size = os.path.getsize(file_path)
+            
+            # Use chunked reading for large files (> 100MB)
+            if file_size > 100_000_000:  # 100MB
+                df_iterator = await asyncio.to_thread(
+                    read_malformed_csv, 
+                    file_path, 
+                    chunksize=10000  # Corrected argument name
+                )
+                
+                for chunk in df_iterator:
+                    records = chunk.to_dict(orient='records')
+                    await insert_records_in_batches(records, file_path, scylla_app)
+            else:
+                # Read entire file at once for smaller files
+                df = await asyncio.to_thread(read_malformed_csv, file_path)
+                records = df.to_dict(orient='records')
                 await insert_records_in_batches(records, file_path, scylla_app)
+                
+        elif file_path.endswith('.txt'):
+            async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='replace') as file:
+                records = []
+                async for line in file:
+                    try:
+                        record = json.loads(line)
+                        records.append(record)
+                        if len(records) >= 10000:  # Process in chunks
+                            await insert_records_in_batches(records, file_path, scylla_app)
+                            records = []
+                    except json.JSONDecodeError:
+                        continue
+                
+                # Process remaining records
+                if records:
+                    await insert_records_in_batches(records, file_path, scylla_app)
         else:
             console.print(f"[red]Unsupported file type: {file_path}[/red]")
+            
     except Exception as e:
-        console.print(f"[red]Error processing file {file_path}: {e}[/red]")
-def read_malformed_csv(file_path, delimiter=','):
-    cleaned_data = []
+        console.print(f"[red]Error processing file {file_path}: {str(e)}[/red]")
+        console.print("[yellow]Attempting to continue with next file...[/yellow]")
+def read_malformed_csv(file_path, delimiter=',', chunksize=None):
+    """Read CSV file with support for chunked reading and multiple encodings"""
     encodings = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252', 'utf-16', 'utf-32']
+    
     for encoding in encodings:
         try:
-            with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
-                reader = csv.reader(file, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
-                headers = next(reader, None)  # Read the first row as headers
-                if headers:
-                    cleaned_data.append(headers)
-                for row in reader:
-                    try:
-                        cleaned_data.append(row)
-                    except csv.Error as e:
-                        console.print(f"[red]Error processing row {reader.line_num}: {e}[/red]")
-                        continue
-            break
+            if chunksize:
+                # Read in chunks using pandas
+                return pd.read_csv(
+                    file_path,
+                    encoding=encoding,
+                    chunksize=chunksize,
+                    on_bad_lines='skip',
+                    low_memory=False,
+                    engine='python'
+                )
+            else:
+                # Read entire file
+                with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
+                    reader = csv.reader(file, delimiter=delimiter, quoting=csv.QUOTE_MINIMAL)
+                    headers = next(reader, None)
+                    cleaned_data = [headers] if headers else []
+                    for row in reader:
+                        try:
+                            cleaned_data.append(row)
+                        except csv.Error as e:
+                            console.print(f"[red]Error processing row: {e}[/red]")
+                            continue
+                return pd.DataFrame(cleaned_data[1:], columns=cleaned_data[0])
+                
         except UnicodeDecodeError:
-            console.print(f"[yellow]Failed to decode file with encoding: {encoding}. Trying next encoding...[/yellow]")
+            console.print(f"[yellow]Failed to decode with {encoding}, trying next encoding...[/yellow]")
             continue
-    else:
-        raise UnicodeDecodeError(f"Unable to decode the file with any of the provided encodings: {encodings}")
-
-    df = pd.DataFrame(cleaned_data[1:], columns=cleaned_data[0])
-    return df
+        except Exception as e:
+            console.print(f"[red]Error reading file with {encoding}: {e}[/red]")
+            continue
+    
+    raise UnicodeDecodeError(f"Unable to decode the file with any of these encodings: {encodings}")
 async def search_scylla(search_input, scylla_app, max_results=None):
     await asyncio.to_thread(_search_scylla, search_input, scylla_app, max_results)
 
@@ -386,6 +686,7 @@ def _search_scylla(search_input, scylla_app, max_results=None):
                 if field == "email":
                     query_conditions.append(f"{field} = '{value}'")
                 else:
+                    query_conditions.append(f"{field} = '{value}'")
                     query_conditions.append(f"{field} = '{value.lower()}'")
                     query_conditions.append(f"{field} = '{value.capitalize()}'")
                     query_conditions.append(f"{field} = '{value.upper()}'")
