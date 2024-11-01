@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔍 OSINT.Scylla
+# 🔍 osint.scylla
 
 A high-performance data management system powered by ScyllaDB
 
@@ -12,7 +12,7 @@ A high-performance data management system powered by ScyllaDB
 
 ## 🎯 Overview
 
-OSINT.Scylla is an advanced data management solution inspired by platforms like IntelX and Snusbase. Built to handle billions of records efficiently, it offers powerful search capabilities and exceptional performance at scale.
+osint.scylla is an advanced data management solution inspired by platforms like IntelX and Snusbase. Built to handle billions of records efficiently, it offers powerful search capabilities and exceptional performance at scale.
 
 ## ✨ Features
 
