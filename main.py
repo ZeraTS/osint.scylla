@@ -21,7 +21,6 @@ import gc
 from datetime import datetime
 import json
 import multiprocessing
-# Rich console setup
 console = Console()
 
 # ScyllaDB connection setup
@@ -42,7 +41,7 @@ class ScyllaApp:
         compression=True,
         control_connection_timeout=10,
         connect_timeout=10,
-        executor_threads=MAX_WORKERS  # Match thread pool size
+        executor_threads=MAX_WORKERS  
     )
      try:
         self.session = self.cluster.connect()
