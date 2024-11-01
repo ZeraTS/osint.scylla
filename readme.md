@@ -54,4 +54,4 @@ python -m venv venv
 source venv/bin/activate # Linux/Mac
 
 # Install dependencies
-pip install -r [requirements.txt](http://_vscodecontentref_/0)
+pip install -r requirements.txt
