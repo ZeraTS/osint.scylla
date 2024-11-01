@@ -15,7 +15,6 @@ def read_random_line(file_path, encoding='utf-8'):
             content = f.read().decode(encoding, errors='replace')
         df = pd.read_csv(io.StringIO(content))
     except UnicodeDecodeError:
-        # Try different encodings if utf-8 fails
         encodings = ['latin1', 'iso-8859-1', 'cp1252']
         for enc in encodings:
             try:
@@ -36,7 +35,6 @@ def modify_header(file_path, encoding='utf-8'):
     try:
         df = pd.read_csv(file_path, encoding=encoding, on_bad_lines='skip')
     except pd.errors.ParserError:
-        # Handle malformed CSV by reading line by line
         cleaned_data = []
         with open(file_path, 'r', encoding=encoding, errors='replace') as file:
             for line in file:
@@ -50,7 +48,7 @@ def modify_header(file_path, encoding='utf-8'):
     for col in df.columns:
         new_header = simpledialog.askstring("Input", f"Enter new header for column '{col}':", parent=root)
         if new_header is None:
-            new_header = col  # Keep the original header if the user cancels
+            new_header = col  
         new_headers.append(new_header)
     
     df.columns = new_headers
@@ -92,8 +90,6 @@ def convert_to_csv(file_path, output_path, encoding='utf-8'):
                 chunk.to_csv(output_path, mode='a', index=False, encoding=encoding, header=not os.path.exists(output_path))
                 pbar.update(len(chunk))
     elif file_path.endswith('.mybbsql'):
-        # Assuming .mybbsql is a MySQL dump file
-        # You need to have MySQL server running and accessible
         import mysql.connector
         conn = mysql.connector.connect(user='username', password='password', host='localhost', database='database_name')
         raise ValueError(".mybbsql is not a supported file format")
@@ -202,3 +198,5 @@ def main_menu():
 
 if __name__ == "__main__":
     main_menu()
+
+#credit is given to Claude for assisting with code generation for this utilty script for conversion / editing / modification. 
