@@ -1,6 +1,6 @@
 # Introduction ✍️
 
-Welcome to the **osint.db** repository! This project leverages ScyllaDB to store large amounts of data efficiently. Initially, I experimented with different databases like MongoDB and MySQL for search queries yet felt dis-satisfied, and ultimately discovered this resource. My main goal was to understand how sites like IntelX and Snusbase handle breached information at massive scales with billions of lines. Feel free to explore the source code. While it's not my prettiest work, with some effort and tinkering, you could develop a REST API using the provided resource.
+Welcome to the **osint.scylla** repository! This project leverages ScyllaDB to store large amounts of data efficiently. Initially, I experimented with different databases like MongoDB and MySQL for search queries yet felt dis-satisfied, and ultimately discovered this resource. My main goal was to understand how sites like IntelX and Snusbase handle breached information at massive scales with billions of lines. Feel free to explore the source code. While it's not my prettiest work, with some effort and tinkering, you could develop a REST API using the provided resource.
 
 ## Features ✨
 
@@ -21,7 +21,7 @@ To get started with this project, follow these steps:
 1. **Clone the repository:**
 
     ```bash
-    git clone https://github.com/ZeraTS/OSINT.db
+    git clone https://github.com/ZeraTS/osint.scylla
     cd OSINT.db
     ```
 
