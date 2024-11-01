@@ -1,0 +1,7 @@
+concurrent.futures
+pandas
+tk
+tqdm
+rich
+cassandra-driver
+aiofiles
