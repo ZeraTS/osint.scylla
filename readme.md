@@ -49,6 +49,57 @@ To run the project, follow these steps:
     ```
 
 2. **Follow the on-screen instructions to [brief description of what the user should do].**
+## Frequently Asked Questions 💭
+
+<details>
+<summary>What is ScyllaDB and why use it?</summary>
+
+ScyllaDB is a high-performance NoSQL database that's compatible with Apache Cassandra but offers better performance and scalability. We use it because:
+- Handles massive datasets efficiently
+- Offers excellent read/write performance
+- Supports concurrent operations effectively
+- Compatible with Cassandra's ecosystem
+</details>
+
+<details>
+<summary>How do I configure ScyllaDB for this project?</summary>
+
+1. Install ScyllaDB on your system
+2. Default configuration uses:
+   - Host: localhost
+   - Port: 9042
+   - Keyspace: user_data
+3. Modify these settings in the `ScyllaApp` class constructor if needed
+</details>
+
+<details>
+<summary>What file formats are supported?</summary>
+
+Currently supported formats:
+- CSV files (*.csv)
+- Text files (*.txt) (username:password) format
+
+Data fields should contain at least one of these fields:
+- email
+- username
+- first_name
+- last_name
+- phone_number
+</details>
+
+<details>
+<summary>How do I optimize performance for large files?</summary>
+
+The system automatically:
+- Adjusts batch sizes based on file size
+- Uses concurrent processing for large files
+- Implements memory-efficient chunk processing
+
+For best results:
+- Keep files under 1GB per batch
+- Ensure proper indexing in ScyllaDB
+- Use SSD storage for the database
+</details>
 
 ## Contributing 🤝
 
